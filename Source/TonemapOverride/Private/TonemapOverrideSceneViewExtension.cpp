@@ -11,7 +11,6 @@
 #include "TonemapOverride.h"
 #include "HDRHelper.h"
 #include "PixelShaderUtils.h"
-#include "PostProcess/ACESUtils.h"
 #include "PostProcess/DrawRectangle.h"
 
 
@@ -25,11 +24,6 @@ class FTonemapOverrideShaderCommon : public FGlobalShader
 public:
 	static const int32 GroupSize = 8;
 	
-	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
-	{
-		return true;
-	}
-
 	static bool PipelineVolumeTextureLUTSupportGuaranteedAtRuntime(EShaderPlatform Platform)
 	{
 		return RHIVolumeTextureRenderingSupportGuaranteed(Platform) && (RHISupportsGeometryShaders(Platform) || RHISupportsVertexShaderLayer(Platform));
@@ -80,11 +74,6 @@ BEGIN_SHADER_PARAMETER_STRUCT(FACESTonemapShaderParameters, )
 	SHADER_PARAMETER(float, ACESCoefsHigh_4)
 	SHADER_PARAMETER(float, ACESSceneColorMultiplier)
 	SHADER_PARAMETER(float, ACESGamutCompression)
-#if ENGINE_MINOR_VERSION >= 7
-	SHADER_PARAMETER_SRV(Texture2D<float>, ACESReachTable)
-	SHADER_PARAMETER_SRV(Texture2D<float>, ACESGamutTable)
-	SHADER_PARAMETER_SRV(Texture2D<float>, ACESGammaTable)
-#endif
 END_SHADER_PARAMETER_STRUCT()
 
 BEGIN_SHADER_PARAMETER_STRUCT(FTonemapOverrideLUTParameters, )
@@ -129,9 +118,6 @@ BEGIN_SHADER_PARAMETER_STRUCT(FTonemapOverrideLUTParameters, )
 	SHADER_PARAMETER(float, FilmWhiteClip)
 	SHADER_PARAMETER(uint32, bIsTemperatureWhiteBalance)
 	SHADER_PARAMETER(FVector3f, MappingPolynomial)
-#if ENGINE_MINOR_VERSION >= 7
-	SHADER_PARAMETER(uint32, bUseMobileTonemapper)
-#endif
 	SHADER_PARAMETER_STRUCT_INCLUDE(FTonemapperOutputDeviceParameters, OutputDevice)
 	SHADER_PARAMETER_STRUCT_INCLUDE(FCustomTonemapperParameters, CustomTonemapperParameters)
 END_SHADER_PARAMETER_STRUCT()
@@ -153,19 +139,10 @@ struct FCachedLUTSettings
 	ECustomTonemapOperator CachedTonemapOperator;
 	EGT7UCSType CachedGT7UCSType;
 	
-	bool UpdateCachedValues(
-#if ENGINE_MINOR_VERSION >= 7
-		FRDGBuilder& GraphBuilder,
-#endif
-		const FViewInfo& View, uint32 LUTSize, const UTonemapOverrideSettings& TonemapOverrideSettings)
+	bool UpdateCachedValues(const FViewInfo& View, uint32 LUTSize, const UTonemapOverrideSettings& TonemapOverrideSettings)
 	{
 		bool bHasChanged = false;
-#if ENGINE_MINOR_VERSION >= 7
-		GetCombineLUTParameters(GraphBuilder, View, LUTSize, bHasChanged);
-#else
 		GetCombineLUTParameters(View, LUTSize, bHasChanged);
-#endif
-		
 		GetCustomLUTParameters(TonemapOverrideSettings, bHasChanged);
 		UPDATE_CACHE_SETTINGS(UniqueID, View.State ? View.State->GetViewKey() : 0, bHasChanged);
 		UPDATE_CACHE_SETTINGS(ShaderPlatform, View.GetShaderPlatform(), bHasChanged);
@@ -204,11 +181,7 @@ struct FCachedLUTSettings
 		return FVector3f(a, b, c);
 	}
 
-
 	void GetCombineLUTParameters(
-#if ENGINE_MINOR_VERSION >= 7
-		FRDGBuilder& GraphBuilder,
-#endif
 		const FViewInfo& View,
 		int32 LUTSize,
 		bool& bHasChanged)
@@ -234,19 +207,6 @@ struct FCachedLUTSettings
 		UPDATE_CACHE_SETTINGS(Parameters.ACESTonemapParameters.ACESCoefsHigh_4, TonemapperParams.ACESCoefsHigh_4, bHasChanged);
 		UPDATE_CACHE_SETTINGS(Parameters.ACESTonemapParameters.ACESSceneColorMultiplier, TonemapperParams.ACESSceneColorMultiplier, bHasChanged);
 		UPDATE_CACHE_SETTINGS(Parameters.ACESTonemapParameters.ACESGamutCompression, TonemapperParams.ACESGamutCompression, bHasChanged);
-#if ENGINE_MINOR_VERSION >= 7
-/*		
- *		For actual ACES update implementation these would need to be set
- *		
- *		UE::Color::ACES::GetTransformResources(
-			GraphBuilder,
-			HDRGetDisplayMaximumLuminance(),
-			Parameters.ACESTonemapParameters.ACESReachTable,
-			Parameters.ACESTonemapParameters.ACESGamutTable,
-			Parameters.ACESTonemapParameters.ACESGammaTable
-		);
-		*/
-#endif
 
 		UPDATE_CACHE_SETTINGS(Parameters.ColorScale, FVector3f(View.ColorScale), bHasChanged);
 		UPDATE_CACHE_SETTINGS(Parameters.OverlayColor, FVector4f(View.OverlayColor), bHasChanged);
@@ -543,11 +503,8 @@ FRDGTextureRef FTonemapOverrideSceneViewExtension::CreateOverrideLUT_RenderThrea
 
 	// Check if postprocessing values have been updated
 	const UTonemapOverrideSettings& TonemapOverrideSettings = UTonemapOverrideSettings::Get();
-#if ENGINE_MINOR_VERSION >= 7
-	const bool bHasChanged = CachedLUTSettings.UpdateCachedValues(GraphBuilder,ViewInfo, TextureLUTSize, TonemapOverrideSettings);
-#else
 	const bool bHasChanged = CachedLUTSettings.UpdateCachedValues(ViewInfo, TextureLUTSize, TonemapOverrideSettings);
-#endif
+
 	static const auto CVarUpdateEveryFrame = IConsoleManager::Get().FindConsoleVariable(TEXT("r.LUT.UpdateEveryFrame"));
 
 	if (bHasChanged || CVarUpdateEveryFrame->GetInt() > 0)
@@ -582,8 +539,11 @@ FScreenPassTexture FTonemapOverrideSceneViewExtension::CreateOverrideLUT(FRDGBui
 	
 	bool _bUseFloatOutput = false;
 
-	const bool bUseComputePass = View.bUseComputePasses;
-	const bool bUseVolumeTextureLUT =  FTonemapOverrideLUTShaderCS::PipelineVolumeTextureLUTSupportGuaranteedAtRuntime(View.GetShaderPlatform());
+	const bool bUseVolumeTextureLUT = FTonemapOverrideLUTShaderCS::PipelineVolumeTextureLUTSupportGuaranteedAtRuntime(View.GetShaderPlatform());
+	// Must mirror PostProcessCombineLUTs.cpp: when a volume LUT is used the engine allocates the
+	// CombinedLUTRenderTarget with only TexCreate_UAV (no TexCreate_RenderTargetable), so the PS
+	// path would fail RDG validation. Force the compute path in that case.
+	const bool bUseComputePass = bUseVolumeTextureLUT || View.bUseComputePasses;
 	const bool bUseFloatOutput = ViewFamily.SceneCaptureSource == SCS_FinalColorHDR || ViewFamily.SceneCaptureSource == SCS_FinalToneCurveHDR;
 
 	if (_bUseFloatOutput != bUseFloatOutput)
